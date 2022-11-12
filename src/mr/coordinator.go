@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"sync"
 )
 import "net"
@@ -37,94 +39,8 @@ type TaskMetaList struct {
 
 // Your code here -- RPC handlers for the worker to call.
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
-
-// start a thread that listens for RPCs from worker.go
-func (c *Coordinator) server() {
-	rpc.Register(c) // ？ Register怎么用
-	rpc.HandleHTTP()
-	//l, e := net.Listen("tcp", ":1234")
-	sockname := coordinatorSock()
-	os.Remove(sockname)
-	l, e := net.Listen("unix", sockname)
-	if e != nil {
-		log.Fatal("listen error:", e)
-	}
-	go http.Serve(l, nil)
-}
-
-// main/mrcoordinator.go calls Done() periodically to find out
-// if the entire job has finished.
-func (c *Coordinator) Done() bool {
-	ret := false
-	// Your code here.
-
-	if c.JobState == JobAllDone {
-		fmt.Printf("All tasks are finished,the coordinator will be exit! !")
-		ret = true
-	}
-
-	return ret
-}
-
-func (c *Coordinator) makeMapTask() {
-	for _, file := range c.Files {
-		taskId := c.generateTaskId()
-		task := Task{
-			TaskId:   taskId,
-			TaskType: MapTask,
-			FileName: []string{file},
-		}
-		taskMetaInfo := &TaskMetaInfo{
-			TaskState: WaitingTaskState,
-			TaskAddr:  &task,
-		}
-		c.TaskMetaList.MetaList[taskId] = taskMetaInfo
-		fmt.Printf("[makeMapTask] making a map task =%v \n", task)
-		c.MapTaskChan <- &task
-	}
-}
-func (c *Coordinator) generateTaskId() int {
-	res := c.TaskStaticId
-	c.TaskStaticId++
-	return res
-}
-
-// PollTask 获取任务
-func (c *Coordinator) PollTask(args *TaskRequest, reply *Task) error {
-
-	mu.Lock()
-	defer mu.Unlock()
-	currentJobState := c.JobState
-	switch currentJobState {
-	case MapJobState:
-		{
-			if len(c.MapTaskChan) > 0 {
-				reply = <-c.MapTaskChan
-				fmt.Printf("[PollTask]poll the map task=%v \n", *reply)
-				if !c.TaskMetaList.checkTaskState(reply.TaskId) {
-					fmt.Println("current task is working")
-				}
-			} else {
-				reply.TaskType = WaitingTask
-				if c.TaskMetaList.CheckTaskDone() {
-					fmt.Println("All task Done go to the next job state")
-				}
-				return nil
-			}
-		}
-	default:
-		return errors.New("error Job State")
-	}
-	return nil
-}
-
+// check the task state is waiting or not
+// if is waiting state, which means it is an initial task
 func (list *TaskMetaList) checkTaskState(taskId int) bool {
 	task, ok := list.MetaList[taskId]
 	if !ok || task.TaskState != WaitingTaskState {
@@ -169,6 +85,213 @@ func (list *TaskMetaList) CheckTaskDone() bool {
 	return false
 }
 
+func (list *TaskMetaList) addMetaTaskInfo(meta *TaskMetaInfo) bool {
+	taskId := meta.TaskAddr.TaskId
+	listMeta, _ := list.MetaList[taskId]
+	if listMeta != nil {
+		fmt.Println("task meta info is already in list")
+		return false
+	}
+	list.MetaList[taskId] = meta
+	return true
+
+}
+
+// Example an example RPC handler.
+//
+// Example the RPC argument and reply types are defined in rpc.go.
+func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
+	reply.Y = args.X + 1
+	return nil
+}
+
+// start a thread that listens for RPCs from worker.go
+func (c *Coordinator) server() {
+	rpc.Register(c) // ？ Register怎么用
+	rpc.HandleHTTP()
+	//l, e := net.Listen("tcp", ":1234")
+	sockname := coordinatorSock()
+	_ = os.Remove(sockname)
+
+	l, e := net.Listen("unix", sockname)
+	if e != nil {
+		log.Fatal("listen error:", e)
+	}
+	go http.Serve(l, nil)
+}
+
+// Done main/mrcoordinator.go calls Done() periodically to find out
+// if the entire job has finished.
+func (c *Coordinator) Done() bool {
+	ret := false
+	// Your code here.
+	mu.Lock()
+	defer mu.Unlock()
+	if c.JobState == JobAllDone {
+		fmt.Printf("All tasks are finished,the coordinator will be exit! !")
+		ret = true
+	}
+
+	return ret
+}
+
+func (c *Coordinator) makeMapTask() {
+	for _, file := range c.Files {
+
+		task := Task{
+			TaskId:    c.generateTaskId(),
+			TaskType:  MapTask,
+			ReduceNum: c.ReduceNum,
+			FileName:  []string{file},
+		}
+		taskMetaInfo := &TaskMetaInfo{
+			TaskState: WaitingTaskState,
+			TaskAddr:  &task,
+		}
+		c.TaskMetaList.addMetaTaskInfo(taskMetaInfo)
+
+		fmt.Printf("[makeMapTask] making a map task =%v \n", task)
+		c.MapTaskChan <- &task
+	}
+}
+
+func (c *Coordinator) makeReduceTask() {
+	for i := 0; i < c.ReduceNum; i++ {
+		fileNames := c.selectReduceNum(i)
+		taskId := c.generateTaskId()
+		task := Task{
+			TaskId:    taskId,
+			TaskType:  ReduceTask,
+			ReduceNum: c.ReduceNum,
+			FileName:  fileNames,
+		}
+		taskMetaInfo := &TaskMetaInfo{
+			TaskState: WaitingTaskState,
+			TaskAddr:  &task,
+		}
+		c.TaskMetaList.addMetaTaskInfo(taskMetaInfo)
+		fmt.Printf("[makeMapTask] making a reduce task =%v \n", task)
+		c.ReduceTaskChan <- &task
+	}
+}
+
+func (c *Coordinator) selectReduceNum(reduceNum int) []string {
+	var res []string
+	path, _ := os.Getwd()        //Getwd返回一个对应当前工作目录的根路径。
+	files, _ := os.ReadDir(path) // ReadDir 读取指定目录，返回按文件名排序的所有目录条目。
+	for _, file := range files {
+		flag := strings.HasPrefix(file.Name(), "mr-tmp") && strings.HasSuffix(file.Name(), strconv.Itoa(reduceNum))
+		if flag {
+			res = append(res, file.Name())
+		}
+	}
+	return res
+}
+
+func (c *Coordinator) generateTaskId() int {
+	res := c.TaskStaticId
+	c.TaskStaticId++
+	return res
+}
+
+// PollTask 获取任务
+func (c *Coordinator) PollTask(args *TaskRequest, reply *Task) error {
+
+	mu.Lock()
+	defer mu.Unlock()
+	currentJobState := c.JobState
+	switch currentJobState {
+	case MapJobState:
+		{
+			if len(c.MapTaskChan) > 0 {
+				*reply = *<-c.MapTaskChan
+				fmt.Printf("[PollTask]poll the map task=%v \n", *reply)
+				if !c.TaskMetaList.checkTaskState(reply.TaskId) {
+					fmt.Println("current task is working")
+				}
+			} else {
+				reply.TaskType = WaitingTask
+				if c.TaskMetaList.CheckTaskDone() {
+					// 如果所有Map任务都完成，就进入下一个阶段
+					c.switchJobState()
+					fmt.Println("All task Done go to the next job state")
+				}
+				return nil
+			}
+		}
+	case ReduceJobState:
+		{
+			if len(c.ReduceTaskChan) > 0 {
+				*reply = *<-c.ReduceTaskChan
+				fmt.Printf("[PollTask]poll the reduce task=%v \n", *reply)
+				if !c.TaskMetaList.checkTaskState(reply.TaskId) {
+					fmt.Println("current task is working")
+				}
+			} else {
+				// 此时通道已经没有任务了
+				reply.TaskType = WaitingTask
+				if c.TaskMetaList.CheckTaskDone() {
+					// 如果所有Reduce任务都完成，就进入下一个阶段
+					c.switchJobState()
+					fmt.Println("All task Done go to the next job state")
+				}
+				return nil
+			}
+		}
+	case JobAllDone:
+		{
+			reply.TaskType = DoneTask
+		}
+	default:
+		return errors.New("error Job State")
+	}
+	return nil
+}
+
+func (c *Coordinator) switchJobState() {
+
+	if c.JobState == MapJobState {
+		// 初始化Reduce任务
+		c.makeReduceTask()
+		// 更改任务
+		c.JobState = ReduceJobState
+	} else if c.JobState == ReduceJobState {
+		c.JobState = JobAllDone
+	}
+}
+
+func (c *Coordinator) MarkTaskDone(args *Task, reply *Task) error {
+	mu.Lock()
+	defer mu.Unlock()
+	taskType := args.TaskType
+	taskId := args.TaskId
+	switch taskType {
+	case MapTask:
+		{
+			meta, ok := c.TaskMetaList.MetaList[taskId]
+			if ok && meta.TaskState == WorkingTaskState {
+				meta.TaskState = TaskDoneState
+				fmt.Printf("[MarkTaskDone]map task(id=%v) is done\n", taskId)
+			} else {
+				fmt.Printf("[MarkTaskDone]map task(id=%v) was done already", taskId)
+			}
+		}
+	case ReduceTask:
+		{
+			meta, ok := c.TaskMetaList.MetaList[taskId]
+			if ok && meta.TaskState == WorkingTaskState {
+				meta.TaskState = TaskDoneState
+				fmt.Printf("[MarkTaskDone]reduce task(id=%v) is done\n", taskId)
+			} else {
+				fmt.Printf("[MarkTaskDone]reduce task(id=%v) was done already", taskId)
+			}
+		}
+	default:
+		fmt.Println("[MarkTaskDone] error task type")
+	}
+	return nil
+}
+
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
@@ -178,7 +301,10 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		TaskStaticId:   1,
 		MapTaskChan:    make(chan *Task, len(files)),
 		ReduceTaskChan: make(chan *Task, nReduce),
-		Files:          files,
+		TaskMetaList: TaskMetaList{
+			MetaList: make(map[int]*TaskMetaInfo, len(files)+nReduce),
+		},
+		Files: files,
 	}
 
 	// Your code here.
