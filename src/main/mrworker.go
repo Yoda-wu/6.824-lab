@@ -17,6 +17,8 @@ import "fmt"
 import "log"
 
 func main() {
+	fmt.Println(os.Args)
+	fmt.Println(len(os.Args))
 	if len(os.Args) != 2 {
 		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so\n")
 		os.Exit(1)
@@ -27,14 +29,13 @@ func main() {
 	mr.Worker(mapf, reducef)
 }
 
-//
 // load the application Map and Reduce functions
 // from a plugin file, e.g. ../mrapps/wc.so
-//
 func loadPlugin(filename string) (func(string, string) []mr.KeyValue, func(string, []string) string) {
 	p, err := plugin.Open(filename)
+	fmt.Println(filename)
 	if err != nil {
-		log.Fatalf("cannot load plugin %v", filename)
+		log.Fatalf("cannot load plugin %v err=%v", filename, err)
 	}
 	xmapf, err := p.Lookup("Map")
 	if err != nil {
