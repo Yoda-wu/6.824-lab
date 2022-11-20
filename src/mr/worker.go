@@ -51,26 +51,26 @@ func Worker(mapf func(string, string) []KeyValue,
 			{
 				DoMapTask(mapf, &task)
 
-				fmt.Println("Handling the map task......")
+				//fmt.Println("Handling the map task......")
 
 				CallTaskDone(&task)
 
 			}
 		case WaitingTask:
 			{
-				fmt.Println("waiting task......")
+				//fmt.Println("waiting task......")
 				time.Sleep(time.Second)
 			}
 		case ReduceTask:
 			{
 				DoReduceTask(reducef, &task)
 
-				fmt.Println("Handling the reduce task......")
+				//fmt.Println("Handling the reduce task......")
 				CallTaskDone(&task)
 			}
 		case DoneTask:
 			{
-				fmt.Println("job all done......")
+				//fmt.Println("job all done......")
 				flag = false
 			}
 
@@ -109,7 +109,10 @@ func DoMapTask(mapf func(string, string) []KeyValue, task *Task) {
 		tempFile, _ := os.Create(tempFileName)
 		enc := json.NewEncoder(tempFile)
 		for _, kv := range hashKV[i] {
-			_ = enc.Encode(kv)
+			err = enc.Encode(kv)
+			if err != nil {
+				return
+			}
 		}
 		_ = tempFile.Close()
 	}
@@ -131,7 +134,7 @@ func DoReduceTask(reducef func(string, []string) string, task *Task) {
 		for j < len(intermediateKV) && intermediateKV[j].Key == intermediateKV[i].Key {
 			j++
 		}
-		values := []string{}
+		var values []string
 		for k := i; k < j; k++ {
 			values = append(values, intermediateKV[k].Value)
 		}
@@ -172,7 +175,7 @@ func CallTaskDone(task *Task) Task {
 	reply := Task{}
 	ok := call("Coordinator.MarkTaskDone", args, &reply)
 	if ok {
-		fmt.Printf("[CallTaskDone] success! reply=%v \n", reply)
+		fmt.Printf("[CallTaskDone] success! \n")
 	} else {
 		fmt.Println("[CallTaskDone] fail!")
 	}
