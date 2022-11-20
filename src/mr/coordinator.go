@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 import "net"
 import "os"
@@ -31,6 +32,7 @@ type Coordinator struct {
 
 type TaskMetaInfo struct {
 	TaskState TaskState
+	StartTime time.Time
 	TaskAddr  *Task
 }
 type TaskMetaList struct {
@@ -47,10 +49,12 @@ func (list *TaskMetaList) checkTaskState(taskId int) bool {
 		return false
 	}
 	task.TaskState = WorkingTaskState
+	task.StartTime = time.Now()
 	return true
 }
 
 func (list *TaskMetaList) CheckTaskDone() bool {
+	//fmt.Println(len(list.MetaList))
 	var (
 		mapTaskDoneNum      = 0
 		reduceTaskDoneNum   = 0
@@ -58,12 +62,12 @@ func (list *TaskMetaList) CheckTaskDone() bool {
 		reduceTaskUnDoneNum = 0
 	)
 	for _, meta := range list.MetaList {
+		//fmt.Printf("[checkTaskDone] meta=%v \n", meta)
 		if meta.TaskAddr.TaskType == MapTask {
 			if meta.TaskState != TaskDoneState {
 				mapTaskUnDoneNum++
 			} else {
 				mapTaskDoneNum++
-				break
 			}
 		}
 		if meta.TaskAddr.TaskType == ReduceTask {
@@ -71,7 +75,6 @@ func (list *TaskMetaList) CheckTaskDone() bool {
 				reduceTaskUnDoneNum++
 			} else {
 				reduceTaskDoneNum++
-				break
 			}
 		}
 	}
@@ -214,7 +217,7 @@ func (c *Coordinator) PollTask(args *TaskRequest, reply *Task) error {
 				if c.TaskMetaList.CheckTaskDone() {
 					// 如果所有Map任务都完成，就进入下一个阶段
 					c.switchJobState()
-					fmt.Println("All task Done go to the next job state")
+					fmt.Println("All map task Done go to the next job state")
 				}
 				return nil
 			}
@@ -233,7 +236,7 @@ func (c *Coordinator) PollTask(args *TaskRequest, reply *Task) error {
 				if c.TaskMetaList.CheckTaskDone() {
 					// 如果所有Reduce任务都完成，就进入下一个阶段
 					c.switchJobState()
-					fmt.Println("All task Done go to the next job state")
+					fmt.Println("All reduce task Done go to the next job state")
 				}
 				return nil
 			}
@@ -312,5 +315,41 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.makeMapTask()
 
 	c.server()
+	go c.CrashDetect()
 	return &c
+}
+
+func (c *Coordinator) CrashDetect() {
+	// 启动一个循环来检测
+	for {
+		fmt.Println("Crash detecting......")
+		time.Sleep(time.Second * 4)
+		mu.Lock()
+		// job 结束了则不需要进行检测。
+		if c.JobState == JobAllDone {
+			mu.Unlock()
+			break
+		}
+		for _, v := range c.TaskMetaList.MetaList {
+			fmt.Printf("[CrashDetect] metalist len = %v checking task=%v\n", len(c.TaskMetaList.MetaList), v)
+			if v.TaskState == WorkingTaskState && time.Since(v.StartTime) > 9*time.Second {
+				fmt.Printf("the task[ %d ] is crash,take [%d] s\n", v.TaskAddr.TaskId, time.Since(v.StartTime))
+				switch v.TaskAddr.TaskType {
+				case MapTask:
+					{
+						c.MapTaskChan <- v.TaskAddr
+						v.TaskState = WaitingTaskState
+					}
+				case ReduceTask:
+					{
+						c.ReduceTaskChan <- v.TaskAddr
+						v.TaskState = WaitingTaskState
+					}
+
+				}
+			}
+
+		}
+		mu.Unlock()
+	}
 }
