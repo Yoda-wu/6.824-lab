@@ -54,9 +54,9 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 type LogEntry struct {
-	Index     int
-	Term      int
-	Operation ApplyMsg
+	Index   int
+	Term    int
+	Command interface{}
 }
 
 // Raft
@@ -105,6 +105,16 @@ const (
 	Normal
 	Expire
 	Voted
+)
+
+type AppendState int
+
+const (
+	APPEND_KILL AppendState = iota
+	APPEND_EXPIRE
+	APPEND_SUCCESS
+	APPEND_INCONSIS
+	APPEND_COMMITED
 )
 
 // GetState return currentTerm and whether this server
@@ -244,7 +254,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteState = Normal
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
-		fmt.Printf("[	    func-RequestVote-rf(%+v)		] : rf.voted: %v\n", rf.me, rf.voteFor)
+		fmt.Printf("[func-RequestVote-rf(%+v)] : vote to : %v\n", rf.me, rf.voteFor)
 
 		rf.timer.Reset(rf.electionTimeout)
 
@@ -274,12 +284,40 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int  // current term for leader to update itself
-	Success bool // true if follower contained entry matching prevLogIndex and prevLogterm
+	Term        int // current term for leader to update itself
+	AppendState AppendState
+	NextIndex   int
+	Success     bool // true if follower contained entry matching prevLogIndex and prevLogterm
 }
 
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestVoteReply) {
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// pass
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// crash 发生
+	if rf.killed() {
+		reply.AppendState = APPEND_KILL
+		reply.Success = false
+		reply.Term = -1
+		return
+	}
+	// leader‘s term < follower's term - reject
+	if rf.currentTerm > args.Term {
+		reply.AppendState = APPEND_EXPIRE
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	// 当前节点落后leader节点
+	if args.PrevLogIndex > 0 && (len(rf.logs) < args.PrevLogIndex || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		reply.AppendState = APPEND_INCONSIS
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		reply.NextIndex = rf.lastApplied + 1
+		return
+	}
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -324,7 +362,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		}
 		ok = rf.peers[server].Call("Raft.RequestVote", args, reply)
 	}
-	fmt.Printf("[	    func-sendRequestVote-rf(%+v)->rf(%+v)		] : vote rpc result: %v\n", rf.me, server, ok)
+	fmt.Printf("[func-sendRequestVote-rf(%+v)->rf(%+v)] : vote rpc result: %v\n", rf.me, server, ok)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	switch reply.VoteState {
@@ -362,8 +400,24 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 	return ok
 }
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, successNum *int) bool {
+	if rf.killed() {
+		return false
+	}
+
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	for !ok {
+		ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	}
+	fmt.Printf("[func-sendAppendEntries-rf(%+v)->rf(%+v)] :rpc result: %v\n", rf.me, server, ok)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	switch reply.AppendState {
+	case APPEND_KILL:
+		{
+			return false
+		}
+	}
 	return ok
 }
 
@@ -385,7 +439,26 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.killed() {
+		return index, term, false
+	}
+	// 不是leader直接返回
+	if rf.state != Leader {
+		return index, term, false
+	}
 
+	term = rf.currentTerm
+	entry := LogEntry{
+		Term:    term,
+		Index:   len(rf.logs),
+		Command: command,
+	}
+
+	rf.logs = append(rf.logs, entry)
+	index = len(rf.logs)
+	fmt.Printf("[func-Start-rf(%v+)]: index=%v, term=%v, isLeader=%v\n", rf.me, index, term, isLeader)
 	return index, term, isLeader
 }
 
@@ -453,13 +526,14 @@ func (rf *Raft) ticker() {
 					if len(rf.logs) > 0 {
 						voteArgs.LastLogIndex = rf.logs[len(rf.logs)-1].Term
 					}
-					fmt.Printf("[	    func-ticker-rf(%+v)		] : ask rf[%v] for vote: \n", rf.me, i)
+					fmt.Printf("[func-ticker-rf(%+v)] : ask rf[%v] for vote: \n", rf.me, i)
 
 					voteReply := &RequestVoteReply{}
 					go rf.sendRequestVote(i, voteArgs, voteReply, &voteNum)
 				}
 			case Leader:
 				// 进行心跳
+				successNum := 0 // 统计AppendEntries RPC正确返回的的节点数字
 				rf.timer.Reset(HeartBeatTimeout)
 				for i := 0; i < len(rf.peers); i++ {
 					if i == rf.me {
@@ -474,7 +548,14 @@ func (rf *Raft) ticker() {
 						LeaderId:     rf.me,
 					}
 					appendEntriesReply := &AppendEntriesReply{}
-					go rf.sendAppendEntries(rf.me, appendEntriesArg, appendEntriesReply)
+					appendEntriesArg.Entries = rf.logs[rf.nextIndex[i]-1:]
+					if rf.nextIndex[i] > 0 {
+						appendEntriesArg.PrevLogIndex = rf.nextIndex[i] - 1
+					}
+					if appendEntriesArg.PrevLogIndex > 0 {
+						appendEntriesArg.Term = rf.logs[appendEntriesArg.PrevLogIndex].Term
+					}
+					go rf.sendAppendEntries(rf.me, appendEntriesArg, appendEntriesReply, &successNum)
 				}
 			}
 			rf.mu.Unlock()
@@ -500,20 +581,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.currentTerm = 0
 	rf.voteFor = -1
-	rf.logs = make([]LogEntry, 1)
+	rf.logs = make([]LogEntry, 0)
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
-	rf.nextIndex = make([]int, len(peers))
-	rf.matchIndex = make([]int, len(peers))
+	rf.nextIndex = make([]int, len(peers))  // leader maintains a nextIndex for each follower
+	rf.matchIndex = make([]int, len(peers)) // leader maintains a matchIndex for each follower
 	rf.applyChan = applyCh
 
 	rf.state = Follower
 	rf.electionTimeout = time.Duration(150+rand.Intn(200)) * time.Millisecond // 150 - 350 的随机超时时间
 	rf.timer = time.NewTicker(rf.electionTimeout)
 	// Your initialization code here (2A, 2B, 2C).
-	fmt.Printf("[	    func-MakeRaftPeer-rf(%+v)		] : is initing...\n", rf.me)
+	fmt.Printf("[func-MakeRaftPeer-rf(%+v)] : is initing...\n", rf.me)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

@@ -570,6 +570,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			cfg.mu.Unlock()
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
+				fmt.Printf("[config-func-one]: index1=%v\n", index1)
 				if ok {
 					index = index1
 					break
