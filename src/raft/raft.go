@@ -308,15 +308,41 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		return
 	}
-
-	// 当前节点落后leader节点
+	// 落后于leader
 	if args.PrevLogIndex > 0 && (len(rf.logs) < args.PrevLogIndex || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		reply.AppendState = APPEND_INCONSIS
 		reply.Success = false
 		reply.Term = rf.currentTerm
-		reply.NextIndex = rf.lastApplied + 1
+		// 因为apply的index 一定与leader保持一致，所以可以直接定位到这里，省去一步一步确定last agree index的时间
+		reply.NextIndex = rf.lastApplied
 		return
 	}
+	// 领先leader
+
+	// 复制成功的场景
+	rf.currentTerm = args.Term
+	rf.voteFor = args.LeaderId
+	rf.timer.Reset(rf.electionTimeout)
+	rf.state = Follower
+	if rf.logs != nil {
+		rf.logs = rf.logs[:args.PrevLogIndex]
+		rf.logs = append(rf.logs, args.Entries...)
+	}
+	reply.AppendState = APPEND_SUCCESS
+	reply.Term = rf.currentTerm
+	reply.Success = true
+
+	for rf.lastApplied < args.LeaderCommit {
+		rf.lastApplied++
+		applyMsg := ApplyMsg{
+			CommandValid: true,
+			CommandIndex: rf.lastApplied,
+			Command:      rf.logs[rf.lastApplied-1].Command,
+		}
+		rf.applyChan <- applyMsg
+		rf.commitIndex = rf.lastApplied
+	}
+	return
 
 }
 
@@ -391,7 +417,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.state = Leader
 			rf.nextIndex = make([]int, len(rf.peers))
 			for i, _ := range rf.nextIndex {
-				rf.nextIndex[i] = len(rf.logs) + 1
+				rf.nextIndex[i] = len(rf.logs)
 			}
 			rf.timer.Reset(HeartBeatTimeout)
 		}
@@ -407,6 +433,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	for !ok {
+		if rf.killed() {
+			return false
+		}
 		ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	}
 	fmt.Printf("[func-sendAppendEntries-rf(%+v)->rf(%+v)] :rpc result: %v\n", rf.me, server, ok)
