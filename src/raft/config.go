@@ -159,10 +159,13 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 // applier reads message from apply ch and checks that they match the logs
 // contents
 func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
+	//fmt.Printf("[config-func-applier]:rf(%v),applyCh=%v\n", i, applyCh)
 	for m := range applyCh {
+		//fmt.Printf("[config-func-applier]:applych=%v msg=%v\n", applyCh, m)
 		if m.CommandValid == false {
 			// ignore other types of ApplyMsg
 		} else {
+			//fmt.Printf("[config-func-applier]:applych=%v\n", applyCh)
 			cfg.mu.Lock()
 			err_msg, prevok := cfg.checkLogs(i, m)
 			cfg.mu.Unlock()
@@ -570,7 +573,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			cfg.mu.Unlock()
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
-				fmt.Printf("[config-func-one]: index1=%v\n", index1)
+				//fmt.Printf("[config-func-one]: index1=%v rf=%v\n", index1, starts)
 				if ok {
 					index = index1
 					break
@@ -584,6 +587,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				//fmt.Printf("[config-func-one]: cmd=%v， cmd1 =%v nd=%v, expectedServer=%v\n", cmd, cmd1, nd, expectedServers)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {

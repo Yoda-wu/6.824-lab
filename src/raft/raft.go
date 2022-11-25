@@ -131,7 +131,7 @@ func (rf *Raft) GetState() (int, bool) {
 	} else {
 		isleader = false
 	}
-	fmt.Printf("[	    func-GetState-rf(%+v)		] : the peer[%v], state is %v\n", rf.me, rf.me, rf.state)
+	//fmt.Printf("[func-GetState-rf(%+v)] : the peer[%v], state is %v\n", rf.me, rf.me, rf.state)
 
 	return term, isleader
 }
@@ -224,6 +224,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	// 候选人过期了
 	if args.Term < rf.currentTerm {
+		//fmt.Printf("[func-RequestVote-rf(%+v)] : args.Term=%v, rf.currentTerm=%v candidate is expire \n", rf.me, args.Term, rf.currentTerm)
 		reply.VoteState = Expire
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -244,7 +245,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if currentLogIndex >= 0 {
 			currentLogTerm = rf.logs[currentLogIndex].Term
 		}
-		if args.LastLogIndex < currentLogIndex || args.LastLogTerm < currentLogTerm {
+		if args.LastLogTerm < currentLogTerm || (len(rf.logs) > 0 && args.LastLogTerm == currentLogTerm && args.LastLogIndex < len(rf.logs)-1) {
+			//fmt.Printf("[func-RequestVote-rf(%+v)] : args.LastLogTerm=%v, currentLogTerm=%v args.LastLogTerm < currentLogTerm is %v  (len(rf.logs) > 0 && args.LastLogTerm == currentLogTerm && args.LastLogIndex < len(rf.logs) is %v candidate is expire\n",
+			//	rf.me, args.LastLogTerm, currentLogTerm, args.LastLogTerm < currentLogTerm, (len(rf.logs) > 0 && args.LastLogTerm == currentLogTerm && args.LastLogIndex < len(rf.logs)))
 			reply.VoteState = Expire
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
@@ -254,7 +257,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteState = Normal
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
-		fmt.Printf("[func-RequestVote-rf(%+v)] : vote to : %v\n", rf.me, rf.voteFor)
+		//fmt.Printf("[func-RequestVote-rf(%+v)] : vote to : %v\n", rf.me, rf.voteFor)
 
 		rf.timer.Reset(rf.electionTimeout)
 
@@ -291,6 +294,7 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	//fmt.Printf("[func-AppendEntries-rf(%v)]:args =%v rf.logs=%v\n", rf.me, args, rf.logs)
 	// pass
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -309,7 +313,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	// 落后于leader
-	if args.PrevLogIndex > 0 && (len(rf.logs) < args.PrevLogIndex || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
+	if args.PrevLogIndex > 0 && (len(rf.logs) <= args.PrevLogIndex || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		reply.AppendState = APPEND_INCONSIS
 		reply.Success = false
 		reply.Term = rf.currentTerm
@@ -317,21 +321,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.NextIndex = rf.lastApplied
 		return
 	}
-	// 领先leader
+	// 超前于leader
+	if args.PrevLogIndex > -1 && rf.lastApplied > args.LeaderCommit {
+		reply.AppendState = APPEND_COMMITED
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		reply.NextIndex = rf.lastApplied
+		return
+	}
 
 	// 复制成功的场景
 	rf.currentTerm = args.Term
 	rf.voteFor = args.LeaderId
 	rf.timer.Reset(rf.electionTimeout)
 	rf.state = Follower
-	if rf.logs != nil {
-		rf.logs = rf.logs[:args.PrevLogIndex]
+	//fmt.Printf("[func-AppendEntries-rf(%v)]: before replicated rf(%v).logs =%v leaderId=%v args.Entries=%v \n", rf.me, rf.me, rf.logs, args.LeaderId, args.Entries)
+	if args.Entries != nil {
+		if len(rf.logs) > 0 {
+			rf.logs = rf.logs[:args.PrevLogIndex+1]
+		} else {
+			rf.logs = rf.logs[:args.PrevLogIndex]
+		}
+
 		rf.logs = append(rf.logs, args.Entries...)
 	}
 	reply.AppendState = APPEND_SUCCESS
 	reply.Term = rf.currentTerm
 	reply.Success = true
-
+	//fmt.Printf("[func-AppendEntries-rf(%v)]: after replicated rf(%v).logs =%v\n", rf.me, rf.me, rf.logs)
 	for rf.lastApplied < args.LeaderCommit {
 		rf.lastApplied++
 		applyMsg := ApplyMsg{
@@ -342,6 +359,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.applyChan <- applyMsg
 		rf.commitIndex = rf.lastApplied
 	}
+	//fmt.Printf("[func-AppendEntries-rf(%v)]: append success: reply=%v\n", rf.me, *reply)
 	return
 
 }
@@ -388,14 +406,16 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		}
 		ok = rf.peers[server].Call("Raft.RequestVote", args, reply)
 	}
-	fmt.Printf("[func-sendRequestVote-rf(%+v)->rf(%+v)] : vote rpc result: %v\n", rf.me, server, ok)
+	//fmt.Printf("[func-sendRequestVote-rf(%+v)->rf(%+v)] : vote rpc result: %v\n", rf.me, server, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	switch reply.VoteState {
 	case Kill:
+		//fmt.Printf("[func-sendRequestVote-rf(%v)]: server(%v) state=Kill\n", rf.me, server)
 		return false
 	case Expire:
 		{
+			//fmt.Printf("[func-sendRequestVote-rf(%v)]: server(%v) state=Expire\n", rf.me, server)
 			rf.state = Follower
 			rf.timer.Reset(rf.electionTimeout)
 			if reply.Term > rf.currentTerm {
@@ -409,7 +429,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		}
 
 		// 得票数超过一半
-		if *voteNum >= len(rf.peers)/2 {
+		if *voteNum > len(rf.peers)/2 {
 			*voteNum = 0
 			if rf.state == Leader {
 				return ok
@@ -430,7 +450,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	if rf.killed() {
 		return false
 	}
-
+	if rf.state == Follower {
+		return false
+	}
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	for !ok {
 		if rf.killed() {
@@ -438,14 +460,72 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		}
 		ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	}
-	fmt.Printf("[func-sendAppendEntries-rf(%+v)->rf(%+v)] :rpc result: %v\n", rf.me, server, ok)
+	//fmt.Printf("[func-sendAppendEntries-rf(%+v)->rf(%+v)] :rpc result: %v\n", rf.me, server, ok)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	switch reply.AppendState {
 	case APPEND_KILL:
 		{
+			//fmt.Printf("[func-sendAppendEntires-rf(%v)]: server(%v) state=APPEND_KILL\n", rf.me, server)
 			return false
 		}
+	case APPEND_EXPIRE:
+		{
+			rf.state = Follower
+			rf.voteFor = -1
+			rf.timer.Reset(rf.electionTimeout)
+			rf.currentTerm = reply.Term
+			//fmt.Printf("[func-sendAppendEntires-rf(%v)]: server(%v) state=APPEND_EXPIRE\n", rf.me, server)
+		}
+	case APPEND_INCONSIS:
+		{
+			if rf.currentTerm != reply.Term {
+				return false
+			}
+			rf.nextIndex[server] = reply.NextIndex
+			//fmt.Printf("[func-sendAppendEntires-rf(%v)]: server(%v) state=APPEND_INCONSIS rf.nextIndex=%v\n", rf.me, server, rf.nextIndex)
+		}
+	case APPEND_COMMITED:
+		{
+			if rf.currentTerm != reply.Term {
+				return false
+			}
+			if reply.NextIndex > len(rf.logs) {
+				return false
+			}
+			rf.nextIndex[server] = reply.NextIndex
+			//fmt.Printf("[func-sendAppendEntires-rf(%v)]: state=APPEND_COMMITED rf.nextIndex=%v\n", rf.me, rf.nextIndex)
+		}
+	case APPEND_SUCCESS:
+		{
+
+			if reply.Success && reply.Term <= rf.currentTerm && *successNum <= len(rf.peers)/2 {
+				*successNum += 1
+			}
+			//fmt.Printf("[func-sendAppendEntires-rf(%v)]: state=APPEND_SUCCESS successNum=%v half peer=%v\n", rf.me, *successNum, len(rf.peers)/2)
+			if reply.NextIndex > len(rf.logs) {
+				return false
+			}
+			rf.nextIndex[server] += len(args.Entries)
+			if *successNum > len(rf.peers)/2 {
+				*successNum = 0
+				if len(rf.logs) == 0 || rf.logs[len(rf.logs)-1].Term != rf.currentTerm {
+					return false
+				}
+				//fmt.Printf("[func-sendAppendEntries-rf(%v)]:before success commited\n", rf.me)
+				for rf.lastApplied < len(rf.logs) {
+					rf.lastApplied += 1
+					applyMsg := ApplyMsg{
+						CommandValid: true,
+						CommandIndex: rf.lastApplied,
+						Command:      rf.logs[rf.lastApplied-1].Command,
+					}
+					rf.applyChan <- applyMsg
+					rf.commitIndex = rf.lastApplied
+				}
+			}
+		}
+
 	}
 	return ok
 }
@@ -477,7 +557,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state != Leader {
 		return index, term, false
 	}
-
+	//fmt.Printf("[func-Start-rf(%v+)]: command=%v\n ", rf.me, command)
 	term = rf.currentTerm
 	entry := LogEntry{
 		Term:    term,
@@ -487,7 +567,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	rf.logs = append(rf.logs, entry)
 	index = len(rf.logs)
-	fmt.Printf("[func-Start-rf(%v+)]: index=%v, term=%v, isLeader=%v\n", rf.me, index, term, isLeader)
+	//fmt.Printf("[func-Start-rf(%v+)]: index=%v, term=%v, isLeader=%v logEntry=%v\n ", rf.me, index, term, isLeader, rf.logs)
 	return index, term, isLeader
 }
 
@@ -531,7 +611,6 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			switch rf.state {
 			case Follower:
-
 				rf.state = Candidate //follower先转换到candidate状态
 				fallthrough          // 会直接执行紧跟着后面的一个case
 			case Candidate:
@@ -553,16 +632,16 @@ func (rf *Raft) ticker() {
 						LastLogTerm:  0,
 					}
 					if len(rf.logs) > 0 {
-						voteArgs.LastLogIndex = rf.logs[len(rf.logs)-1].Term
+						voteArgs.LastLogTerm = rf.logs[len(rf.logs)-1].Term
 					}
-					fmt.Printf("[func-ticker-rf(%+v)] : ask rf[%v] for vote: \n", rf.me, i)
+					//fmt.Printf("[func-ticker-rf(%+v)] : ask rf[%v] for vote: args:=%v \n", rf.me, i, voteArgs)
 
 					voteReply := &RequestVoteReply{}
 					go rf.sendRequestVote(i, voteArgs, voteReply, &voteNum)
 				}
 			case Leader:
 				// 进行心跳
-				successNum := 0 // 统计AppendEntries RPC正确返回的的节点数字
+				successNum := 1 // 统计AppendEntries RPC正确返回的的节点数字
 				rf.timer.Reset(HeartBeatTimeout)
 				for i := 0; i < len(rf.peers); i++ {
 					if i == rf.me {
@@ -577,14 +656,17 @@ func (rf *Raft) ticker() {
 						LeaderId:     rf.me,
 					}
 					appendEntriesReply := &AppendEntriesReply{}
-					appendEntriesArg.Entries = rf.logs[rf.nextIndex[i]-1:]
+					//fmt.Printf("[func-ticker-leader(rf=%v)]rf.nextIndex[%v]=%v,len(rf.logs)=%v\n", rf.me, i, rf.nextIndex[i], len(rf.logs))
+					appendEntriesArg.Entries = rf.logs[rf.nextIndex[i]:]
+					//fmt.Printf("[func-ticker-leader(rf=%v)]rf.nextIndex=%v,appendArgs.Entirs=%v\n", rf.me, rf.nextIndex, appendEntriesArg.Entries)
 					if rf.nextIndex[i] > 0 {
 						appendEntriesArg.PrevLogIndex = rf.nextIndex[i] - 1
 					}
 					if appendEntriesArg.PrevLogIndex > 0 {
-						appendEntriesArg.Term = rf.logs[appendEntriesArg.PrevLogIndex].Term
+						appendEntriesArg.PrevLogTerm = rf.logs[appendEntriesArg.PrevLogIndex].Term
 					}
-					go rf.sendAppendEntries(rf.me, appendEntriesArg, appendEntriesReply, &successNum)
+
+					go rf.sendAppendEntries(i, appendEntriesArg, appendEntriesReply, &successNum)
 				}
 			}
 			rf.mu.Unlock()
