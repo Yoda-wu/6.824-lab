@@ -142,7 +142,7 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	v := m.Command
 	for j := 0; j < len(cfg.logs); j++ {
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
-			log.Printf("%v: logs %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
+			log.Printf("server %v: logs %v; server %v\n", i, cfg.logs[i][m.CommandIndex], cfg.logs[j][m.CommandIndex])
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
@@ -159,10 +159,13 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 // applier reads message from apply ch and checks that they match the logs
 // contents
 func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
+
 	for m := range applyCh {
+		//fmt.Printf("[config-func-applier]:applych=%v msg=%v\n", applyCh, m)
 		if m.CommandValid == false {
 			// ignore other types of ApplyMsg
 		} else {
+			//DPrintf("[config-func-applier]:rf(%v), applyMsg=%v\n", i, m)
 			cfg.mu.Lock()
 			err_msg, prevok := cfg.checkLogs(i, m)
 			cfg.mu.Unlock()
@@ -219,6 +222,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 
 	for m := range applyCh {
 		err_msg := ""
+		//DPrintf("[config]-applierSnap = %v \n", m)
 		if m.SnapshotValid {
 			if rf.CondInstallSnapshot(m.SnapshotTerm, m.SnapshotIndex, m.Snapshot) {
 				cfg.mu.Lock()
@@ -226,7 +230,10 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 				cfg.mu.Unlock()
 			}
 		} else if m.CommandValid {
+
 			if m.CommandIndex != cfg.lastApplied[i]+1 {
+				//DPrintf("server %v apply out of order, expected index %v, got %v", i, cfg.lastApplied[i]+1, m.CommandIndex)
+
 				err_msg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", i, cfg.lastApplied[i]+1, m.CommandIndex)
 			}
 
@@ -243,7 +250,6 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 			cfg.mu.Lock()
 			cfg.lastApplied[i] = m.CommandIndex
 			cfg.mu.Unlock()
-
 			if (m.CommandIndex+1)%SnapShotInterval == 0 {
 				w := new(bytes.Buffer)
 				e := labgob.NewEncoder(w)
@@ -253,6 +259,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 					xlog = append(xlog, cfg.logs[i][j])
 				}
 				e.Encode(xlog)
+				//DPrintf("server %v before snapshot", i)
 				rf.Snapshot(m.CommandIndex, w.Bytes())
 			}
 		} else {
@@ -570,6 +577,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			cfg.mu.Unlock()
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
+				//fmt.Printf("[config-func-one]: index1=%v rf=%v\n", index1, starts)
 				if ok {
 					index = index1
 					break
@@ -583,6 +591,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				//fmt.Printf("[config-func-one]: cmd=%v， cmd1 =%v nd=%v, expectedServer=%v\n", cmd, cmd1, nd, expectedServers)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
