@@ -8,7 +8,9 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
@@ -907,6 +909,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		for i := 0; i < servers; i++ {
 			_, _, ok := cfg.rafts[i].Start(rand.Int() % 10000)
 			if ok && cfg.connected[i] {
+				//DPrintf("leader is %v\n", i)
 				leader = i
 			}
 		}
@@ -920,6 +923,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		}
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
+			//DPrintf("disconnect leader  %v\n", leader)
 			cfg.disconnect(leader)
 			nup -= 1
 		}
@@ -927,6 +931,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
+				//DPrintf("reconnect server  %v\n", s)
 				cfg.connect(s)
 				nup += 1
 			}
@@ -938,6 +943,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
+	DPrintf("all server are connected  \n")
 
 	cfg.one(rand.Int()%10000, servers, true)
 
@@ -1111,6 +1117,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 	leader1 := cfg.checkOneLeader()
 
 	for i := 0; i < iters; i++ {
+		//log.Println(i)
 		victim := (leader1 + 1) % servers
 		sender := leader1
 		if i%3 == 1 {
@@ -1119,10 +1126,14 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 
 		if disconnect {
+			//log.Println("disconnect", victim)
+
 			cfg.disconnect(victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
 		if crash {
+			//log.Println("crash", victim)
+
 			cfg.crash1(victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
@@ -1130,6 +1141,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		// perhaps send enough to get a snapshot
 		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
 		for i := 0; i < nn; i++ {
+
 			cfg.rafts[sender].Start(rand.Int())
 		}
 
@@ -1138,6 +1150,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			// make sure all followers have caught up, so that
 			// an InstallSnapshot RPC isn't required for
 			// TestSnapshotBasic2D().
+			//log.Println("cfg.one")
 			cfg.one(rand.Int(), servers, true)
 		} else {
 			cfg.one(rand.Int(), servers-1, true)
