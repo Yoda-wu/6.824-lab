@@ -74,3 +74,6 @@ func (ps *Persister) SnapshotSize() int {
 	defer ps.mu.Unlock()
 	return len(ps.snapshot)
 }
+func (rf *Raft) GetRaftStateSize() int {
+	return rf.persister.RaftStateSize()
+}
