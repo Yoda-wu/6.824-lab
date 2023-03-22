@@ -32,7 +32,7 @@ import (
 )
 
 // HeartBeatTimeout 心跳超时时间
-var HeartBeatTimeout = 35 * time.Millisecond
+var HeartBeatTimeout = 25 * time.Millisecond
 
 // ApplyMsg
 // as each Raft peer becomes aware that successive logs entries are
